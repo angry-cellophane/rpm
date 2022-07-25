@@ -6,8 +6,6 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <ctype.h>
-#include <dirent.h>
-#include <fcntl.h>
 #if defined(__linux__)
 #include <sys/personality.h>
 #endif
@@ -74,7 +72,7 @@ static FDSTACK_t fdGetFps(FD_t fd)
 
 static void fdSetFdno(FD_t fd, int fdno)
 {
-    if (fd) 
+    if (fd)
 	fd->fps->fdno = fdno;
 }
 
@@ -151,7 +149,7 @@ struct FDIO_s {
 static const FDIO_t fdio;
 static const FDIO_t ufdio;
 static const FDIO_t gzdio;
-#ifdef HAVE_BZLIB_H
+#if HAVE_BZLIB_H
 static const FDIO_t bzdio;
 #endif
 #ifdef HAVE_LZMA_H
@@ -250,7 +248,7 @@ static void fdstat_print(FD_t fd, const char * msg, FILE * fp)
 off_t fdSize(FD_t fd)
 {
     struct stat sb;
-    off_t rc = -1; 
+    off_t rc = -1;
 
     if (fd != NULL && fstat(Fileno(fd), &sb) == 0)
 	rc = sb.st_size;
@@ -382,7 +380,7 @@ static ssize_t fdWrite(FDSTACK_t fps, const void * buf, size_t count)
 
 static int fdSeek(FDSTACK_t fps, off_t pos, int whence)
 {
-    return (lseek(fps->fdno, pos, whence) == -1) ? -1 : 0;
+    return lseek(fps->fdno, pos, whence);
 }
 
 static int fdClose(FDSTACK_t fps)
@@ -455,7 +453,7 @@ off_t ufdCopy(FD_t sfd, FD_t tfd)
  * Deal with remote url's by fetching them with a helper application
  * and treat as local file afterwards.
  * TODO:
- * - better error checking + reporting 
+ * - better error checking + reporting
  * - curl & friends don't know about hkp://, transform to http?
  */
 
@@ -523,33 +521,14 @@ fprintf(stderr, "*** ufdOpen(%s,0x%x,0%o)\n", url, (unsigned)flags, (unsigned)mo
     return fd;
 }
 
-/* Return number of threads ought to be used for compression based
-   on a parsed value threads (e.g. from w7T0.xzdio or w7T16.xzdio).
-   Value -1 means automatic detection. */
-
-static int
-get_compression_threads(int threads)
-{
-    if (threads == -1)
-	threads = rpmExpandNumeric("%{getncpus}");
-
-#if __WORDSIZE == 32
-    /* Limit threads up to 4 for 32-bit systems.  */
-    if (threads > 4) {
-	threads = 4;
-	rpmlog(RPMLOG_DEBUG, "threading compression limited to 4 threads on 32-bit systems\n");
-    }
-#endif
-
-    return threads;
-}
-
 static const struct FDIO_s ufdio_s = {
   "ufdio", NULL,
   fdRead, fdWrite, fdSeek, fdClose,
   ufdOpen, NULL, fdFlush, fdTell, fdError, fdStrerr
 };
 static const FDIO_t ufdio = &ufdio_s ;
+
+
 
 /* =============================================================== */
 /* Support for GZIP library.  */
@@ -617,7 +596,7 @@ static int gzdSeek(FDSTACK_t fps, off_t pos, int whence)
 {
     off_t p = pos;
     int rc;
-#ifdef HAVE_GZSEEK
+#if HAVE_GZSEEK
     gzFile gzfile = fps->fp;
 
     if (gzfile == NULL) return -2;	/* XXX can't happen */
@@ -649,13 +628,13 @@ static off_t gzdTell(FDSTACK_t fps)
     gzFile gzfile = fps->fp;
 
     if (gzfile != NULL) {
-#ifdef HAVE_GZSEEK
+#if HAVE_GZSEEK
 	pos = gztell(gzfile);
 	if (pos < 0)
 	    gzdSetError(fps);
 #else
 	pos = -2;
-#endif    
+#endif
     }
     return pos;
 }
@@ -668,7 +647,7 @@ static const FDIO_t gzdio = &gzdio_s ;
 
 /* =============================================================== */
 /* Support for BZIP2 library.  */
-#ifdef HAVE_BZLIB_H
+#if HAVE_BZLIB_H
 
 #include <bzlib.h>
 
@@ -790,15 +769,11 @@ static LZFILE *lzopen_internal(const char *mode, int fd, int xz)
 	    if (isdigit(*(mode+1))) {
 #ifdef HAVE_LZMA_MT
 		threads = atoi(++mode);
-		/* T0 means automatic detection */
-		if (threads == 0)
-		    threads = -1;
 #endif
 		/* skip past rest of digits in string that atoi()
 		 * should've processed
 		 * */
 		while (isdigit(*++mode));
-		--mode;
 	    }
 #ifdef HAVE_LZMA_MT
 	    else
@@ -822,7 +797,8 @@ static LZFILE *lzopen_internal(const char *mode, int fd, int xz)
 		ret = lzma_easy_encoder(&lzfile->strm, level, LZMA_CHECK_SHA256);
 #ifdef HAVE_LZMA_MT
 	    } else {
-		threads = get_compression_threads(threads);
+		if (threads == -1)
+		    threads = sysconf(_SC_NPROCESSORS_ONLN);
 		lzma_mt mt_options = {
 		    .flags = 0,
 		    .threads = threads,
@@ -831,6 +807,45 @@ static LZFILE *lzopen_internal(const char *mode, int fd, int xz)
 		    .preset = level,
 		    .filters = NULL,
 		    .check = LZMA_CHECK_SHA256 };
+
+#if __WORDSIZE == 32
+		/* In 32 bit environment, required memory easily exceeds memory address
+		 * space limit if compressing using multiple threads.
+		 * By setting a memory limit, liblzma will automatically adjust number
+		 * of threads to avoid exceeding memory.
+		 */
+		if (threads > 1) {
+		    struct utsname u;
+		    uint32_t memlimit = (SIZE_MAX>>1) + (SIZE_MAX>>3);
+		    uint64_t memory_usage;
+		    /* While a 32 bit linux kernel will have an address limit of 3GiB
+		     * for processes (which is why set the memory limit to 2.5GiB as a safety
+		     * margin), 64 bit kernels will have a limit of 4GiB for 32 bit binaries.
+		     * Therefore the memory limit should be higher if running on a 64 bit
+		     * kernel, so we increase it to 3,5GiB.
+		     */
+		    uname(&u);
+		    if (strstr(u.machine, "64") || strstr(u.machine, "s390x")
+#if defined(__linux__)
+				    || ((personality(0xffffffff) & PER_MASK) == PER_LINUX32)
+#endif
+			    )
+			memlimit += (SIZE_MAX>>2);
+
+		    /* keep reducing the number of threads until memory usage gets below limit */
+		    while ((memory_usage = lzma_stream_encoder_mt_memusage(&mt_options)) > memlimit) {
+			/* number of threads shouldn't be able to hit zero with compression
+			 * settings aailable to set through rpm... */
+			assert(--mt_options.threads != 0);
+		    }
+		    lzma_memlimit_set(&lzfile->strm, memlimit);
+
+		    if (threads != (int)mt_options.threads)
+			rpmlog(RPMLOG_NOTICE,
+				"XZ: Adjusted the number of threads from %d to %d to not exceed the memory usage limit of %u bytes",
+				threads, mt_options.threads, memlimit);
+		}
+#endif
 
 		ret = lzma_stream_encoder_mt(&lzfile->strm, &mt_options);
 	    }
@@ -1058,8 +1073,6 @@ static rpmzstd rpmzstdNew(int fdno, const char *fmode)
     char *te = t + sizeof(stdio) - 2;
     int c;
     int threads = 0;
-    int windowlog = 27;
-    int longdist = 0;
 
     switch ((c = *s++)) {
     case 'a':
@@ -1093,39 +1106,23 @@ static rpmzstd rpmzstdNew(int fdno, const char *fmode)
 		threads = strtol(s, (char **)&s, 10);
 		/* T0 means automatic detection */
 		if (threads == 0)
-		    threads = -1;
+		    threads = sysconf(_SC_NPROCESSORS_ONLN);
 	    }
-	    continue;
-    case 'L':
-	    c = *s++;
-	    longdist = 1;
-	    if (c >= (int)'0' && c <= (int)'9') {
-		windowlog = strtol(s-1, (char **)&s, 10);
-		ZSTD_bounds bounds = ZSTD_cParam_getBounds(ZSTD_c_windowLog);
-		if (windowlog < bounds.lowerBound){
-		    windowlog = bounds.lowerBound;
-		    rpmlog(RPMLOG_WARNING, "Invalid long distance matching window log for zstd. Using %i instead.\n", bounds.lowerBound);
-		}
-		if (windowlog > bounds.upperBound) {
-		    windowlog = bounds.upperBound;
-		    rpmlog(RPMLOG_WARNING, "Invalid long distance matching window log for zstd. Using %i instead.\n", bounds.upperBound);
-		}
-   	    }
 	    continue;
 	default:
 	    if (c >= (int)'0' && c <= (int)'9') {
 		level = strtol(s-1, (char **)&s, 10);
-		ZSTD_bounds bounds = ZSTD_cParam_getBounds(ZSTD_c_compressionLevel);
-		if (level < bounds.lowerBound){
-		    level = bounds.lowerBound;
-		    rpmlog(RPMLOG_WARNING, "Invalid compression level for zstd. Using %i instead.\n", bounds.lowerBound);
+		if (level < 1){
+		    level = 1;
+		    rpmlog(RPMLOG_WARNING, "Invalid compression level for zstd. Using %i instead.\n", 1);
 		}
-		if (level > bounds.upperBound) {
-		    level = bounds.upperBound;
-		    rpmlog(RPMLOG_WARNING, "Invalid compression level for zstd. Using %i instead.\n", bounds.upperBound);
+		if (level > 19) {
+		    level = 19;
+		    rpmlog(RPMLOG_WARNING, "Invalid compression level for zstd. Using %i instead.\n", 19);
 		}
 	    }
 	    continue;
+	    break;
 	}
 	break;
     }
@@ -1141,28 +1138,19 @@ static rpmzstd rpmzstdNew(int fdno, const char *fmode)
     if ((flags & O_ACCMODE) == O_RDONLY) {	/* decompressing */
 	if ((_stream = (void *) ZSTD_createDStream()) == NULL
 	 || ZSTD_isError(ZSTD_initDStream(_stream))) {
-	    goto err;
+	    return NULL;
 	}
 	nb = ZSTD_DStreamInSize();
     } else {					/* compressing */
 	if ((_stream = (void *) ZSTD_createCCtx()) == NULL
 	 || ZSTD_isError(ZSTD_CCtx_setParameter(_stream, ZSTD_c_compressionLevel, level))) {
-	    goto err;
+	    return NULL;
 	}
 
-	if (longdist) {
-	    if (ZSTD_isError(ZSTD_CCtx_setParameter(_stream, ZSTD_c_enableLongDistanceMatching, longdist))
-	     || ZSTD_isError(ZSTD_CCtx_setParameter(_stream, ZSTD_c_windowLog, windowlog))) {
-	        goto err;
-	    }
-	}
-
-	threads = get_compression_threads(threads);
 	if (threads > 0) {
 	    if (ZSTD_isError (ZSTD_CCtx_setParameter(_stream, ZSTD_c_nbWorkers, threads)))
 		rpmlog(RPMLOG_DEBUG, "zstd library does not support multi-threading\n");
 	}
-
 	nb = ZSTD_CStreamOutSize();
     }
 
@@ -1176,14 +1164,6 @@ static rpmzstd rpmzstdNew(int fdno, const char *fmode)
     zstd->b = xmalloc(nb);
 
     return zstd;
-
-err:
-    fclose(fp);
-    if ((flags & O_ACCMODE) == O_RDONLY)
-	ZSTD_freeDStream(_stream);
-    else
-	ZSTD_freeCCtx(_stream);
-    return NULL;
 }
 
 static FD_t zstdFdopen(FD_t fd, int fdno, const char * fmode)
@@ -1270,8 +1250,8 @@ assert(zstd);
 	zstd->zob.pos  = 0;
 
 	/* Compress next chunk. */
-	int xx = ZSTD_compressStream2(zstd->_stream, &zstd->zob, &zib, ZSTD_e_continue);
-	if (ZSTD_isError(xx)) {
+        int xx = ZSTD_compressStream2(zstd->_stream, &zstd->zob, &zib, ZSTD_e_continue);
+        if (ZSTD_isError(xx)) {
 	    fps->errcookie = ZSTD_getErrorName(xx);
 	    return -1;
 	}
@@ -1389,7 +1369,7 @@ ssize_t Fwrite(const void *buf, size_t size, size_t nmemb, FD_t fd)
     if (fd != NULL) {
 	FDSTACK_t fps = fdGetFps(fd);
 	fdio_write_function_t _write = FDIOVEC(fps, write);
-	
+
 	fdstat_enter(fd, FDSTAT_WRITE);
 	do {
 	    rc = (_write ? _write(fps, buf, size * nmemb) : -2);
@@ -1444,7 +1424,7 @@ int Fclose(FD_t fd)
 	}
 
 	/* Debugging stats for compresed types */
-	if (_rpmio_debug && fps->fdno == -1)
+	if ((_rpmio_debug || rpmIsDebug()) && fps->fdno == -1)
 	    fdstat_print(fd, fps->io->ioname, stderr);
 
 	/* Leave freeing the last one after stats */
@@ -1536,7 +1516,7 @@ static void cvtfmode (const char *m,
 
     *stdio = *other = '\0';
     if (end != NULL)
-	*end = (c != '\0' && *m != '\0' ? m : NULL);
+	*end = (*m != '\0' ? m : NULL);
     if (f != NULL)
 	*f = flags;
 }
@@ -1547,10 +1527,10 @@ static FDIO_t findIOT(const char *name)
 	&fdio_s,
 	&ufdio_s,
 	&gzdio_s,
-#ifdef HAVE_BZLIB_H
+#if HAVE_BZLIB_H
 	&bzdio_s,
 #endif
-#ifdef HAVE_LZMA_H
+#if HAVE_LZMA_H
 	&xzdio_s,
 	&lzdio_s,
 #endif
@@ -1574,7 +1554,7 @@ static FDIO_t findIOT(const char *name)
 
 FD_t Fdopen(FD_t ofd, const char *fmode)
 {
-    char stdio[20], other[20], stdioz[40];
+    char stdio[20], other[20], zstdio[40];
     const char *end = NULL;
     FDIO_t iot = NULL;
     FD_t fd = ofd;
@@ -1589,9 +1569,9 @@ fprintf(stderr, "*** Fdopen(%p,%s) %s\n", fd, fmode, fdbg(fd));
     cvtfmode(fmode, stdio, sizeof(stdio), other, sizeof(other), &end, NULL);
     if (stdio[0] == '\0')
 	return NULL;
-    stdioz[0] = '\0';
-    strncat(stdioz, stdio, sizeof(stdioz) - strlen(stdioz) - 1);
-    strncat(stdioz, other, sizeof(stdioz) - strlen(stdioz) - 1);
+    zstdio[0] = '\0';
+    strncat(zstdio, stdio, sizeof(zstdio) - strlen(zstdio) - 1);
+    strncat(zstdio, other, sizeof(zstdio) - strlen(zstdio) - 1);
 
     if (end == NULL && other[0] == '\0')
 	return fd;
@@ -1606,7 +1586,7 @@ fprintf(stderr, "*** Fdopen(%p,%s) %s\n", fd, fmode, fdbg(fd));
     }
 
     if (iot && iot->_fdopen)
-	fd = iot->_fdopen(fd, fdno, stdioz);
+	fd = iot->_fdopen(fd, fdno, zstdio);
 
 DBGIO(fd, (stderr, "==> Fdopen(%p,\"%s\") returns fd %p %s\n", ofd, fmode, (fd ? fd : NULL), fdbg(fd)));
     return fd;
@@ -1698,7 +1678,7 @@ int Fileno(FD_t fd)
 	if (rc != -1)
 	    break;
     }
-    
+
 DBGIO(fd, (stderr, "==> Fileno(%p) rc %d %s\n", (fd ? fd : NULL), rc, fdbg(fd)));
     return rc;
 }
@@ -1753,7 +1733,7 @@ int rpmioSlurp(const char * fn, uint8_t ** bp, ssize_t * blenp)
 
 exit:
     if (fd) (void) Fclose(fd);
-	
+
     if (rc) {
 	if (b) free(b);
 	b = NULL;
@@ -1814,48 +1794,48 @@ DIGEST_CTX fdDupDigest(FD_t fd, int id)
 
 static void set_cloexec(int fd)
 {
-    int flags = fcntl(fd, F_GETFD);
+	int flags = fcntl(fd, F_GETFD);
 
-    if (flags == -1 || (flags & FD_CLOEXEC))
-	return;
+	if (flags == -1 || (flags & FD_CLOEXEC))
+		return;
 
-    fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+	fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
 void rpmSetCloseOnExec(void)
 {
-    const int min_fd = STDERR_FILENO; /* don't touch stdin/out/err */
-    int fd;
+	const int min_fd = STDERR_FILENO; /* don't touch stdin/out/err */
+	int fd;
 
-    DIR *dir = opendir("/proc/self/fd");
-    if (dir == NULL) { /* /proc not available */
-	/* iterate over all possible fds, might be slow */
-	struct rlimit rl;
-	int open_max;
+	DIR *dir = opendir("/proc/self/fd");
+	if (dir == NULL) { /* /proc not available */
+		/* iterate over all possible fds, might be slow */
+		struct rlimit rl;
+		int open_max;
 
-	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_max != RLIM_INFINITY)
-	    open_max = rl.rlim_max;
-	else
-	    open_max = sysconf(_SC_OPEN_MAX);
+		if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_max != RLIM_INFINITY)
+			open_max = rl.rlim_max;
+		else
+			open_max = sysconf(_SC_OPEN_MAX);
 
-	if (open_max == -1)
-	    open_max = 1024;
+		if (open_max == -1)
+			open_max = 1024;
 
-	for (fd = min_fd + 1; fd < open_max; fd++)
-	    set_cloexec(fd);
+		for (fd = min_fd + 1; fd < open_max; fd++)
+			set_cloexec(fd);
+
+		return;
+	}
+
+	/* iterate over fds obtained from /proc */
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL) {
+		fd = atoi(entry->d_name);
+		if (fd > min_fd)
+			set_cloexec(fd);
+	}
+
+	closedir(dir);
 
 	return;
-    }
-
-    /* iterate over fds obtained from /proc */
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-	fd = atoi(entry->d_name);
-	if (fd > min_fd)
-	    set_cloexec(fd);
-    }
-
-    closedir(dir);
-
-    return;
 }

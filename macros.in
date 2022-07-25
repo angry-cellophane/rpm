@@ -26,9 +26,11 @@
 %__awk			@AWK@
 %__bzip2		@__BZIP2@
 %__cat			@__CAT@
+%__chgrp		@__CHGRP@
 %__chmod		@__CHMOD@
 %__chown		@__CHOWN@
 %__cp			@__CP@
+%__cpio			@__CPIO@
 %__file			@__FILE@
 %__gpg			@__GPG@
 %__grep			@__GREP@
@@ -36,18 +38,25 @@
 %__id			@__ID@
 %__id_u			%{__id} -u
 %__install		@__INSTALL@
-%__ln			@__LN@
-%__ln_s			%{__ln} -s
+%__ln_s			@LN_S@
 %__lrzip		@__LRZIP@
 %__lzip			@__LZIP@
+# Deprecated, use %__xz instead.
+%__lzma			%__xz --format=lzma
 %__xz			@__XZ@
 %__make			@__MAKE@
 %__mkdir		@__MKDIR@
-%__mkdir_p		%{__mkdir} -p
+%__mkdir_p		@__MKDIR_P@
 %__mv			@__MV@
 %__patch		@__PATCH@
+%__perl			@__PERL@
+%__python		@__PYTHON@
+%__restorecon		@__RESTORECON@
 %__rm			@__RM@
+%__rsh			@__RSH@
 %__sed			@__SED@
+%__semodule		@__SEMODULE@
+%__ssh			@__SSH@
 %__tar			@__TAR@
 %__unzip		@__UNZIP@
 %__zstd			@__ZSTD@
@@ -66,11 +75,19 @@
 %__cpp			@CPP@
 %__cxx			@CXX@
 %__ld			@__LD@
+%__nm			@__NM@
+%__objcopy		@__OBJCOPY@
 %__objdump		@__OBJDUMP@
+%__ranlib		@RANLIB@
+%__remsh		%{__rsh}
 %__strip		@__STRIP@
-%__rpmuncompress	%{_rpmconfigdir}/rpmuncompress
 
-%__find_debuginfo	@__FIND_DEBUGINFO@
+# XXX avoid failures if tools are not installed when rpm is built.
+%__libtoolize		libtoolize
+%__aclocal		aclocal
+%__autoheader		autoheader
+%__automake		automake
+%__autoconf		autoconf
 
 #==============================================================================
 # Conditional build stuff.
@@ -80,25 +97,47 @@
 %defined()	%{expand:%%{?%{1}:1}%%{!?%{1}:0}}
 %undefined()	%{expand:%%{?%{1}:0}%%{!?%{1}:1}}
 
-# Handle conditional builds.
-# (see 'conditionalbuilds' in the manual)
-#
-# Internally, the `--with foo` option defines the macro `_with_foo` and the
-# `--without foo` option defines the macro `_without_foo`.
-# Based on those and a default (used when neither is given), bcond macros
-# define the macro `with_foo`, which should later be checked:
-
-%bcond()	%[ (%2)\
-    ? "%{expand:%%{!?_without_%{1}:%%global with_%{1} 1}}"\
-    : "%{expand:%%{?_with_%{1}:%%global with_%{1} 1}}"\
-]
-%bcond_with()		%bcond %{1} 0
-%bcond_without()	%bcond %{1} 1
-
-# Shorthands for %{defined with_...}:
+# Shorthand for %{defined with_...}
 %with()		%{expand:%%{?with_%{1}:1}%%{!?with_%{1}:0}}
 %without()	%{expand:%%{?with_%{1}:0}%%{!?with_%{1}:1}}
 
+# Handle conditional builds. %bcond_with is for case when feature is
+# default off and needs to be activated with --with ... command line
+# switch. %bcond_without is for the dual case.
+#
+# %bcond_with foo defines symbol with_foo if --with foo was specified on
+# command line.
+# %bcond_without foo defines symbol with_foo if --without foo was *not*
+# specified on command line.
+#
+# For example (spec file):
+#
+# (at the beginning)
+# %bcond_with extra_fonts
+# %bcond_without static
+# (and later)
+# %if %{with extra_fonts}
+# ...
+# %else
+# ...
+# %endif
+# %if ! %{with static}
+# ...
+# %endif
+# %if %{with static}
+# ...
+# %endif
+# %{?with_static: ... }
+# %{!?with_static: ... }
+# %{?with_extra_fonts: ... }
+# %{!?with_extra_fonts: ... }
+
+#
+# The bottom line: never use without_foo, _with_foo nor _without_foo, only
+# with_foo. This way changing default set of bconds for given spec is just
+# a matter of changing single line in it and syntax is more readable.
+%bcond_with()		%{expand:%%{?_with_%{1}:%%global with_%{1} 1}}
+%bcond_without()	%{expand:%%{!?_without_%{1}:%%global with_%{1} 1}}
 #
 #==============================================================================
 # ---- Required rpmrc macros.
@@ -119,16 +158,14 @@
 #	The interpreter used for build scriptlets.
 %_buildshell		/bin/sh
 
+#	The path to the bzip2 executable (legacy, use %{__bzip2} instead).
+%_bzip2bin		%{__bzip2}
+
 #	The location of the rpm database file(s).
 %_dbpath		%{_var}/lib/rpm
 
 #	The location of the rpm database file(s) after "rpm --rebuilddb".
 %_dbpath_rebuild	%{_dbpath}
-
-# 	Keyring type to use
-# 	rpmdb		gpg-pubkey "packages" in rpmdb (default)
-# 	fs		gpg-pubkey files at %_keyringpath
-%_keyring		rpmdb
 
 %_keyringpath		%{_dbpath}/pubkeys/
 
@@ -140,8 +177,8 @@
 #	the script.  See the script for details.
 #
 %__debug_install_post   \
-    %{__find_debuginfo} \\\
-    %{?_smp_build_ncpus:-j%{_smp_build_ncpus}} \\\
+    %{_rpmconfigdir}/find-debuginfo.sh \\\
+    %{?_smp_mflags} \\\
     %{?_missing_build_ids_terminate_build:--strict-build-id} \\\
     %{?_no_recompute_build_ids:-n} \\\
     %{?_include_minidebuginfo:-m} \\\
@@ -199,22 +236,16 @@ package or when debugging this package.\
 %__global_requires_exclude_from		%{?_docdir:%{_docdir}}
 %__global_provides_exclude_from		%{?_docdir:%{_docdir}}
 
-#	Maximum age of preserved changelog entries in binary packages,
-#	relative to newest existing entry. Unix timestamp format.
-%_changelog_trimage	0
+#	The path to the gzip executable (legacy, use %{__gzip} instead).
+%_gzipbin		%{__gzip}
 
 #	The Unix time of the latest kept changelog entry in binary packages.
-#	DEPRACATED, use %_changelog_trimage instead.
+#	Any older entry is not packaged in binary packages.
 %_changelog_trimtime	0
 
 #	If true, set the SOURCE_DATE_EPOCH environment variable
 #	to the timestamp of the topmost changelog entry
 %source_date_epoch_from_changelog 0
-
-#	If true, make sure that buildtime in built rpms
-#	is set to the value of SOURCE_DATE_EPOCH.
-#	Is ignored when SOURCE_DATE_EPOCH is not set.
-%use_source_date_epoch_as_buildtime 0
 
 #	If true, make sure that timestamps in built rpms
 #	are not later than the value of SOURCE_DATE_EPOCH.
@@ -250,6 +281,9 @@ package or when debugging this package.\
 
 #	Path to top of build area.
 %_topdir		%{getenv:HOME}/rpmbuild
+
+#	The path to the unzip executable (legacy, use %{__unzip} instead).
+%_unzipbin		%{__unzip}
 
 #==============================================================================
 # ---- Optional rpmrc macros.
@@ -293,13 +327,18 @@ package or when debugging this package.\
 #	marked as %doc should be installed.
 #%_excludedocs
 
+#	The port and machine name of a FTP proxy host running TIS firewall.
+#
+#%_ftpport
+#%_ftpproxy
+
 #	The signature to use and the location of configuration files for
 #	signing packages with GNU gpg.
 #
 #%_gpg_name
 #%_gpg_path
 
-#	The port and machine name of an HTTP proxy host (used for FTP/HTTP).
+#	The port and machine name of an HTTP proxy host.
 #
 #%_httpport
 #%_httpproxy
@@ -313,9 +352,15 @@ package or when debugging this package.\
 #	
 %_install_langs	all
 
-#	Set ModularityLabel: for packages being build
-#
-#%modularitylabel
+#	The value of CLASSPATH in build scriptlets (iff configured).
+#	
+#%_javaclasspath	all
+
+#	Import packaging conventions from jpackage.org (prefixed with _
+#	to avoid name collisions).
+#	
+%_javadir      %{_datadir}/java
+%_javadocdir   %{_datadir}/javadoc
 
 #	A colon separated list of paths where files should *not* be installed.
 #	Usually, these are network file system mount points.
@@ -338,17 +383,12 @@ package or when debugging this package.\
 #%packager
 
 #	Compression type and level for source/binary package payloads.
-#		"w9.gzdio"	gzip level 9 (default).
-#		"w9.bzdio"	bzip2 level 9.
-#		"w6.xzdio"	xz level 6, xz's default.
-#		"w7T16.xzdio"	xz level 7 using 16 threads
-#		"w7T0.xzdio"	xz level 7 using %{getncpus} threads
-#		"w7T.xzdio"	xz level 7 using %{getncpus} threads
-#		"w6.lzdio"	lzma-alone level 6, lzma's default
-#		"w3.zstdio"	zstd level 3, zstd's default
+#		"w9.gzdio"	    gzip level 9 (default).
+#		"w9.bzdio"	    bzip2 level 9.
+#		"w6.xzdio"	    xz level 6, xz's default.
+#		"w7T16.xzdio"	  xz level 7 using 16 threads
 #		"w19T8.zstdio"	zstd level 19 using 8 threads
-#		"w7T0.zstdio"	zstd level 7 using %{getncpus} threads
-#		"w.ufdio"	uncompressed
+#		"w6.lzdio"	    lzma-alone level 6, lzma's default
 #
 #%_source_payload	w9.gzdio
 #%_binary_payload	w9.gzdio
@@ -376,7 +416,7 @@ package or when debugging this package.\
 
 #	Default patch flags
 #%_default_patch_flags	-s
-%_default_patch_flags --no-backup-if-mismatch -f
+%_default_patch_flags --no-backup-if-mismatch
 
 #==============================================================================
 # ---- Build configuration macros.
@@ -392,9 +432,6 @@ package or when debugging this package.\
 #
 # Note: The default value should be 0 for legacy compatibility.
 %_unpackaged_files_terminate_build	1
-
-# Should duplicate files in %files terminate a build?
-%_duplicate_files_terminate_build	0
 
 #
 # Should missing %doc files in the build directory terminate a build?
@@ -413,7 +450,7 @@ package or when debugging this package.\
 %_binaries_in_noarch_packages_terminate_build	1
 
 # Should invalid utf8 encoding in package metadata terminate a build?
-%_invalid_encoding_terminates_build 1
+%_invalid_encoding_terminates_build 0
 
 # Should invalid version format in requires, provides, ... terminate a build?
 %_wrong_version_format_terminate_build 1
@@ -531,8 +568,12 @@ package or when debugging this package.\
 # Use internal dependency generator rather than external helpers?
 %_use_internal_dependency_generator	1
 
+#
+# Filter GLIBC_PRIVATE Provides: and Requires:
+%_filter_GLIBC_PRIVATE			0
+
 # Directories whose contents should be considered as documentation.
-%__docdir_path %{_datadir}/doc:%{_datadir}/man:%{_datadir}/info:%{_datadir}/gtk-doc/html:%{_datadir}/gnome/help:%{?_docdir}:%{?_mandir}:%{?_infodir}:%{?_javadocdir}:/usr/doc:/usr/man:/usr/info:/usr/X11R6/man
+%__docdir_path %{_datadir}/doc:%{_datadir}/man:%{_datadir}/info:%{_datadir}/gtk-doc/html:%{?_docdir}:%{?_mandir}:%{?_infodir}:%{?_javadocdir}:/usr/doc:/usr/man:/usr/info:/usr/X11R6/man
 
 #
 # Path to scripts to autogenerate package dependencies,
@@ -577,26 +618,89 @@ package or when debugging this package.\
 # ---- Database configuration macros.
 #
 # Select backend database. The following values are supported:
-# bdb_ro Berkeley DB (read-only)
+# bdb Berkeley DB
+# lmdb Lightning Memory-mapped Database
 # ndb new data base format
-# sqlite Sqlite database
-# dummy dummy backend (no actual functionality)
 #
-%_db_backend	      @DB_BACKEND@
+%_db_backend	      bdb
+
+#
+#	Macros used to configure Berkley db parameters.
+#
+# rpmdb macro configuration values are a colon (or white space) separated
+# list of tokens, with an optional '!' negation to explicitly disable bit
+# values, or a "=value" if a parameter. A per-tag value is used (e.g.
+# %_dbi_config_Packages) if defined, otherwise a per-rpmdb default
+# (e.g. %_dbi_config).
+#
+# Here's a short list of the tokens, with a guess of whether the option is
+# useful:
+#	(nothing)	currently used in rpm, known to work.
+#	"+++"		under development, will be supported in rpm eventually.
+#	"???"		I have no clue, you're mostly on your own.
+#
+# If you do find yourself inclined to fiddle, here's what I see (shrug):
+# 1) Only the value of mp_size has any serious impact on overall performance,
+#    and you will need ~256Kb to handle a typical machine install.
+# 2) Only the Packages hash, because of the size of the values (i.e. headers),
+#    will ever need tuning. Diddle the pagesize if you're interested, although
+#    I believe that you will find pagesize=512 "best".
+# 3) Adding nofsync increases speed, but risks total data loss. Fiddle shared
+#    and/or mp_size instead.
+#
+#   token	works?	Berkeley db flag or value
+#==================================================
+#---------------------- DBENV tunable values:
+#   mmapsize=16Mb	DBENV->set_mp_mmapsize
+#   cachesize=1Mb	DBENV->set_cachesize, DB->set_cachesize
+#---------------------- DB->open bits:
+#   nommap	???	DB_NOMMAP
+#----------------------- rpmdb specific configuration:
+#   lockdbfd		(always on for Packages) Use fcntl(2) locking ?
+#   nofsync		Disable fsync(2) call performed after db3 writes?
+#
+
+# Misc BDB tuning options
+%__dbi_other			mp_mmapsize=128Mb mp_size=1Mb
+
+%_dbi_config			%{?__dbi_other}
+
+# "Packages" should have shared/exclusive fcntl(2) lock using "lockdbfd".
+%_dbi_config_Packages		%{?_dbi_config} lockdbfd
 
 #==============================================================================
 # ---- GPG/PGP/PGP5 signature macros.
 #	Macro(s) to hold the arguments passed to GPG/PGP for package
-#	signing.  Expansion result is parsed by popt, so be sure to use
-#	%{shescape} where needed.
+#	signing and verification.
 #
-%__gpg_sign_cmd			%{shescape:%{__gpg}} \
-	gpg --no-verbose --no-armor --no-secmem-warning \
-	%{?_gpg_digest_algo:--digest-algo=%{_gpg_digest_algo}} \
-	%{?_gpg_sign_cmd_extra_args} \
-	%{?_gpg_name:-u %{shescape:%{_gpg_name}}} \
-	-sbo %{shescape:%{?__signature_filename}} \
-	%{?__plaintext_filename:-- %{shescape:%{__plaintext_filename}}}
+
+%__gpg_sign_cmd			%{__gpg} \
+	gpg --no-verbose --no-armor \
+	%{?_gpg_digest_algo:--digest-algo %{_gpg_digest_algo}} \
+	--no-secmem-warning \
+	%{?_gpg_sign_cmd_extra_args:%{_gpg_sign_cmd_extra_args}} \
+	-u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+
+# XXX rpm >= 4.1 verifies signatures internally
+#%__gpg_verify_cmd		%{__gpg} \
+#	gpg --batch --no-verbose --verify --no-secmem-warning \
+#	%{__signature_filename} %{__plaintext_filename}
+#
+# XXX rpm-4.1 verifies prelinked libraries using a prelink undo helper.
+#	Normally this macro is defined in /etc/rpm/macros.prelink, installed
+#	with the prelink package. If the macro is undefined, then prelinked
+#	shared libraries contents are MD5 digest verified (as usual), rather
+#	than MD5 verifying the output of the prelink undo helper.
+#
+#	Note: The 2nd token is used as argv[0] and "library" is a
+#	placeholder that will be deleted and replaced with the appropriate
+#	library file path.
+#%__prelink_undo_cmd     /usr/sbin/prelink prelink -y library
+
+# Horowitz Key Protocol server configuration
+#
+%_hkp_keyserver         http://pgp.mit.edu
+%_hkp_keyserver_query   %{_hkp_keyserver}:11371/pks/lookup?op=get&search=0x
 
 #==============================================================================
 # ---- Transaction macros.
@@ -651,33 +755,19 @@ package or when debugging this package.\
 # Disabler flags for package verification (similar to vsflags)
 %_pkgverify_flags 0x0
 
-# Minimize writes during transactions (at the cost of more reads) to
-# conserve eg SSD disks (EXPERIMENTAL).
-# 1			enable
-# 0 			disable
-# -1 (or undefined)	autodetect on platforms where supported, otherwise
-# 			default to disabled
-#%_minimize_writes      -1
+# Set to 1 to minimize writing (at the cost of more reads) to
+# conserve eg SSD disks.
+%_minimize_writes      0
 
-# Flush file IO during transactions (at a severe cost in performance
-# for rotational disks).
-# 1			enable
-# <= 0 (or undefined)	disable
-#%_flush_io		0
-
-# Set to 1 to have IMA signatures written also on %config files.
-# Note that %config files may be changed and therefore end up with
-# a wrong or missing signature.
-#%_ima_sign_config_files	0
-
-# Set to 1 to have fsverity signatures written for %config files.
-#%_fsverity_sign_config_files	0
+# Set to 1 to flush file IO during transactions (at a severe cost in
+# performance for rotational disks)
+#%_flush_io	0
 
 #
 # Default output format string for rpm -qa
 #
 # XXX	Note: escaped %% for use in headerFormat()
-%_query_all_fmt		%%{nvr}%%{archsuffix}
+%_query_all_fmt		%%{nvra}
 
 #
 # Default for coloring output
@@ -698,7 +788,7 @@ package or when debugging this package.\
 %__os_install_post	%{___build_post}
 
 # Macro to fix broken permissions in sources
-%_fixperms      %{__chmod} -Rf a+rX,u+w,g-w,o-w
+%_fixperms      %{__chmod} -Rf @FIXPERMS@
 
 #==============================================================================
 # ---- Scriptlet template templates.
@@ -714,8 +804,7 @@ package or when debugging this package.\
   RPM_OPT_FLAGS=\"%{optflags}\"\
   RPM_ARCH=\"%{_arch}\"\
   RPM_OS=\"%{_os}\"\
-  RPM_BUILD_NCPUS=\"%{_smp_build_ncpus}\"\
-  export RPM_SOURCE_DIR RPM_BUILD_DIR RPM_OPT_FLAGS RPM_ARCH RPM_OS RPM_BUILD_NCPUS\
+  export RPM_SOURCE_DIR RPM_BUILD_DIR RPM_OPT_FLAGS RPM_ARCH RPM_OS\
   RPM_DOC_DIR=\"%{_docdir}\"\
   export RPM_DOC_DIR\
   RPM_PACKAGE_NAME=\"%{NAME}\"\
@@ -732,17 +821,13 @@ package or when debugging this package.\
   PKG_CONFIG_PATH=\"${PKG_CONFIG_PATH}:%{_libdir}/pkgconfig:%{_datadir}/pkgconfig\"\
   export PKG_CONFIG_PATH\
   \
-  %[%{verbose}?"set -x":""]\
+  %{verbose:set -x}%{!verbose:exec > /dev/null}\
   umask 022\
   cd \"%{u2p:%{_builddir}}\"\
 
 
 #%___build_body		%{nil}
-%___build_post	\
-  RPM_EC=$?\
-  for pid in $(jobs -p); do kill -9 ${pid} || continue; done\
-  exit ${RPM_EC}\
-%{nil}
+%___build_post		exit $?
 
 %___build_template	#!%{___build_shell}\
 %{___build_pre}\
@@ -769,30 +854,6 @@ package or when debugging this package.\
 #%{__spec_prep_body}\
 #%{__spec_prep_post}\
 #%{nil}
-
-%__spec_buildrequires_shell	%{___build_shell}
-%__spec_buildrequires_args	%{___build_args}
-%__spec_buildrequires_cmd	%{___build_cmd}
-%__spec_buildrequires_pre	%{___build_pre}
-%__spec_buildrequires_body	%{___build_body}
-%__spec_buildrequires_post	%{___build_post}
-%__spec_buildrequires_template	#!%{__spec_buildrequires_shell}\
-%{__spec_buildrequires_pre}\
-%{nil}
-
-#%{__spec_buildrequires_body}\
-#%{__spec_buildrequires_post}\
-#%{nil}
-
-%__spec_conf_shell	%{___build_shell}
-%__spec_conf_args	%{___build_args}
-%__spec_conf_cmd	%{___build_cmd}
-%__spec_conf_pre	%{___build_pre}
-%__spec_conf_body	%{___build_body}
-%__spec_conf_post	%{___build_post}
-%__spec_conf_template	#!%{__spec_build_shell}\
-%{__spec_conf_pre}\
-%{nil}
 
 %__spec_build_shell	%{___build_shell}
 %__spec_build_args	%{___build_args}
@@ -938,34 +999,6 @@ package or when debugging this package.\
 %_target_os		%{_host_os}
 
 #==============================================================================
-# ---- compiler flags.
-
-# C compiler flags.  This is traditionally called CFLAGS in makefiles.
-# Historically also available as %%{optflags}, and %%build sets the
-# environment variable RPM_OPT_FLAGS to this value.
-%build_cflags %{optflags}
-
-# C++ compiler flags.  This is traditionally called CXXFLAGS in makefiles.
-%build_cxxflags %{optflags}
-
-# Fortran compiler flags.  Makefiles use both FFLAGS and FCFLAGS as
-# the corresponding variable names.
-%build_fflags %{optflags} %{?_fmoddir:-I%{_fmoddir}}
-
-# Link editor flags.  This is usually called LDFLAGS in makefiles.
-#%build_ldflags -Wl,-z,relro
-
-# Expands to shell code to seot the compiler/linker environment
-# variables CFLAGS, CXXFLAGS, FFLAGS, FCFLAGS, LDFLAGS if they have
-# not been set already.
-%set_build_flags \
-  CFLAGS="${CFLAGS:-%{?build_cflags}}" ; export CFLAGS ; \
-  CXXFLAGS="${CXXFLAGS:-%{?build_cxxflags}}" ; export CXXFLAGS ; \
-  FFLAGS="${FFLAGS:-%{?build_fflags}}" ; export FFLAGS ; \
-  FCFLAGS="${FCFLAGS:-%{?build_fflags}}" ; export FCFLAGS ; \
-  LDFLAGS="${LDFLAGS:-%{?build_ldflags}}" ; export LDFLAGS
-
-#==============================================================================
 # ---- specfile macros.
 #	Macro(s) here can be used reliably for reproducible builds.
 #	(Note: Above is the goal, below are the macros under development)
@@ -976,7 +1009,9 @@ package or when debugging this package.\
 #
 %_configure ./configure
 %configure \
-  %{set_build_flags}; \
+  CFLAGS="${CFLAGS:-%optflags}" ; export CFLAGS ; \
+  CXXFLAGS="${CXXFLAGS:-%optflags}" ; export CXXFLAGS ; \
+  FFLAGS="${FFLAGS:-%optflags}" ; export FFLAGS ; \
   %{_configure} --host=%{_host} --build=%{_build} \\\
 	--program-prefix=%{?_program_prefix} \\\
 	--disable-dependency-tracking \\\
@@ -1000,12 +1035,8 @@ package or when debugging this package.\
 %_make_output_sync %(! %{__make} --version -O >/dev/null 2>&1 || echo -O)
 
 #------------------------------------------------------------------------------
-# Verbosity options passed to make
-%_make_verbose V=1 VERBOSE=1
-
-#------------------------------------------------------------------------------
 # The "make" analogue, hiding the _smp_mflags magic from specs
-%make_build %{__make} %{_make_output_sync} %{?_smp_mflags} %{_make_verbose}
+%make_build %{__make} %{_make_output_sync} %{?_smp_mflags}
 
 #------------------------------------------------------------------------------
 # The make install analogue of %configure for modern autotools:
@@ -1037,6 +1068,43 @@ package or when debugging this package.\
 %sources %{lua: for i, s in ipairs(sources) do print(s.." ") end}
 
 #------------------------------------------------------------------------------
+# Useful perl macros (from Artur Frysiak <wiget@t17.ds.pwr.wroc.pl>)
+#
+# For example, these can be used as (from ImageMagick.spec from PLD site)
+#	[...]
+#	BuildPrereq: perl
+#	[...]
+#	%package perl
+#	Summary: libraries and modules for access to ImageMagick from perl
+#	Group: Development/Languages/Perl
+#	Requires: %{name} = %{version}
+#	%requires_eq    perl
+#	[...]
+#	%install
+#	rm -fr $RPM_BUILD_ROOT
+#	install -d $RPM_BUILD_ROOT/%{perl_sitearch}
+#	[...]
+#	%files perl
+#	%defattr(644,root,root,755)
+#	%{perl_sitearch}/Image
+#	%dir %{perl_sitearch}/auto/Image
+#
+%requires_eq()	%(LC_ALL="C" echo '%*' | xargs -r rpm -q --qf 'Requires: %%{name} = %%{epoch}:%%{version}\\n' | sed -e 's/ (none):/ /' -e 's/ 0:/ /' | grep -v "is not")
+%perl_sitearch	%(eval "`%{__perl} -V:installsitearch`"; echo $installsitearch)
+%perl_sitelib	%(eval "`%{__perl} -V:installsitelib`"; echo $installsitelib)
+%perl_vendorarch %(eval "`%{__perl} -V:installvendorarch`"; echo $installvendorarch)
+%perl_vendorlib  %(eval "`%{__perl} -V:installvendorlib`"; echo $installvendorlib)
+%perl_archlib	%(eval "`%{__perl} -V:installarchlib`"; echo $installarchlib)
+%perl_privlib	%(eval "`%{__perl} -V:installprivlib`"; echo $installprivlib)
+
+#------------------------------------------------------------------------------
+# Useful python macros for determining python version and paths
+#
+%python_sitelib %(%{__python} -Es %{_rpmconfigdir}/python-macro-helper sitelib)
+%python_sitearch %(%{__python} -Es %{_rpmconfigdir}/python-macro-helper sitearch)
+%python_version %(%{__python} -Es %{_rpmconfigdir}/python-macro-helper version)
+
+#------------------------------------------------------------------------------
 # arch macro for all Intel i?86 compatible processors
 #  (Note: This macro (and it's analogues) will probably be obsoleted when
 #   rpm can use regular expressions against target platforms in macro
@@ -1045,16 +1113,8 @@ package or when debugging this package.\
 %ix86   i386 i486 i586 i686 pentium3 pentium4 athlon geode
 
 #------------------------------------------------------------------------------
-# arch macro for all supported 32-bit ARM processors
-%arm32	armv3l armv4b armv4l armv4tl armv5tl armv5tel armv5tejl armv6l armv6hl armv7l armv7hl armv7hnl armv8l armv8hl armv8hnl armv8hcnl
-
-#------------------------------------------------------------------------------
-# arch macro for all supported 32-bit ARM processors (legacy, use %%arm32 instead)
-%arm	%{arm32}
-
-#------------------------------------------------------------------------------
-# arch macro for all supported 64-bit ARM processors
-%arm64	aarch64
+# arch macro for all supported ARM processors
+%arm	armv3l armv4b armv4l armv4tl armv5tl armv5tel armv5tejl armv6l armv6hl armv7l armv7hl armv7hnl
 
 #------------------------------------------------------------------------------
 # arch macro for 32-bit MIPS processors
@@ -1088,18 +1148,6 @@ package or when debugging this package.\
 # arch macro for all supported PowerPC 64 processors
 %power64	ppc64 ppc64p7 ppc64le
 
-#------------------------------------------------------------------------------
-# arch macro for all supported RISC-V processors
-%riscv32	riscv32
-%riscv64	riscv64
-%riscv128	riscv128
-%riscv		%{riscv32} %{riscv64} %{riscv128}
-
-
-#------------------------------------------------------------------------------
-# arch macro for 64-bit LOONGARCH processors
-%loongarch64	loongarch64
-
 #------------------------------------------------------------------------
 # Use in %install to generate locale specific file lists. For example,
 #
@@ -1126,11 +1174,7 @@ package or when debugging this package.\
 %__transaction_selinux		%{__plugindir}/selinux.so
 %__transaction_syslog		%{__plugindir}/syslog.so
 %__transaction_ima		%{__plugindir}/ima.so
-%__transaction_fapolicyd	%{__plugindir}/fapolicyd.so
-%__transaction_fsverity		%{__plugindir}/fsverity.so
 %__transaction_prioreset	%{__plugindir}/prioreset.so
-%__transaction_audit		%{__plugindir}/audit.so
-%__transaction_dbus_announce	%{__plugindir}/dbus_announce.so
 
 #------------------------------------------------------------------------------
 # Macros for further automated spec %setup and patch application
@@ -1163,19 +1207,15 @@ package or when debugging this package.\
 
 # Git
 %__scm_setup_git(q)\
-%{__git} init %{-q} --initial-branch=main\
+%{__git} init %{-q}\
 %{__git} config user.name "%{__scm_username}"\
 %{__git} config user.email "%{__scm_usermail}"\
-%{__git} config gc.auto 0\
-%{__git} add --force .\
+%{__git} add .\
 %{__git} commit %{-q} --allow-empty -a\\\
-	--author "%{__scm_author}" -m "%{NAME}-%{VERSION} base"\
-%{__git} branch rpm-build \
-%{__git} checkout rpm-build \
-%{__git} branch --set-upstream-to=main
+	--author "%{__scm_author}" -m "%{NAME}-%{VERSION} base"
 
 %__scm_apply_git(qp:m:)\
-%{__git} apply --index --reject %{-p:-p%{-p*}} -\
+%{__git} apply --index %{-p:-p%{-p*}} -\
 %{__git} commit %{-q} -m %{-m*} --author "%{__scm_author}"
 
 # Git, using "git am" (-m is unused)
@@ -1183,7 +1223,7 @@ package or when debugging this package.\
 %{expand:%__scm_setup_git %{-q}}
 
 %__scm_apply_git_am(qp:m:)\
-%{__git} am --reject %{-q} %{-p:-p%{-p*}}
+%{__git} am %{-q} %{-p:-p%{-p*}}
 
 # Quilt
 %__scm_setup_quilt(q) %{nil}
@@ -1203,7 +1243,7 @@ package or when debugging this package.\
 %{__bzr} commit %{-q} -m %{-m*}
 
 # Single patch application
-%__apply_patch(qp:m:)\
+%apply_patch(qp:m:)\
 %{lua:\
 local file = rpm.expand("%{1}")\
 local num = rpm.expand("%{2}")\
@@ -1215,39 +1255,13 @@ else\
     print("echo 'Cannot read "..file.."'; exit 1;".."\\n")\
 end}
 
-# Apply patches using %autosetup configured SCM.
-# Typically used with no arguments to apply all patches in the order
-# introduced in the spec, but alternatively can be used to apply indvidual
-# patches in arbitrary order by passing them as arguments.
-# -v		Verbose
-# -p<N>		Prefix strip (ie patch -p argument)
-# -m<min>       Apply patches with number >= min only (if no arguments)
-# -M<max>       Apply patches with number <= max only (if no arguments)
-%autopatch(vp:m:M:) %{lua:
-if #arg == 0 then
-    local lo = tonumber(rpm.expand("%{-m:%{-m*}}"))
-    local hi = tonumber(rpm.expand("%{-M:%{-M*}}"))
-    for i, n in ipairs(patch_nums) do
-        if ((not lo or n >= lo) and (not hi or n <= hi)) then
-            table.insert(arg, n)
-        end
-    end
-end
-local options = rpm.expand("%{!-v:-q} %{-p:-p%{-p*}} ")
-local bynum = {}
-for i, p in ipairs(patches) do
-    bynum[patch_nums[i]] = p
-end
-for i, a in ipairs(arg) do
-    local p = bynum[tonumber(a)]
-    if p then
-        print(rpm.expand("%__apply_patch -m %{basename:"..p.."}  "..options..p.." "..i.."\\n"))
-    else
-        macros.error({"no such patch "..a})
-    end
-end
-}
-
+# Automatically apply all patches
+%autopatch(vp:)\
+%{lua:\
+local options = rpm.expand("%{!-v:-q} %{-p:-p%{-p*}} ")\
+for i, p in ipairs(patches) do\
+    print(rpm.expand("%apply_patch -m %{basename:"..p.."}  "..options..p.." "..i.."\\n"))\
+end}
 
 # One macro to (optionally) do it all.
 # -S<scm name>	Sets the used patch application style, eg '-S git' enables
